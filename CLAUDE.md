@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Darwin Gödel Machine-inspired platform that **automatically evolves** a debt collection voice agent's prompts through simulated conversations, automated evaluation, failure analysis, and targeted prompt mutation — without human intervention. The detailed system design is in `my-design.md` (single source of truth for implementation).
+A platform that **automatically evolves** a debt collection voice agent's prompts through simulated conversations, automated evaluation, failure analysis, and targeted prompt mutation — without human intervention. The detailed system design is in `SYSTEM_DESIGN.md` (single source of truth for implementation).
 
 ## Architecture
 
