@@ -1,0 +1,31 @@
+[project]
+name = "darwin-godel-voice-agent"
+version = "0.1.0"
+description = "Darwin-Gödel Machine: Self-evolving debt collection voice agent"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+    "google-genai>=1.0.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "matplotlib>=3.8",
+    "jinja2>=3.1",
+    "pipecat-ai[openai,deepgram,cartesia,smallwebrtc,silero]>=0.0.50",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "pymongo>=4.6.0",
+    "streamlit>=1.30.0",
+    "plotly>=5.18.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
