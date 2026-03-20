@@ -1,0 +1,145 @@
+[
+  {
+    "id": "run_d4e4e537",
+    "all_version_ids": [
+      "d4e4e537_v0",
+      "d4e4e537_v1a",
+      "d4e4e537_v1b",
+      "d4e4e537_v2a",
+      "d4e4e537_v2b",
+      "d4e4e537_v3a",
+      "d4e4e537_v3b",
+      "d4e4e537_v4a",
+      "d4e4e537_v4b"
+    ],
+    "champion_id": "d4e4e537_v3b",
+    "end_time": "2026-03-18T18:14:37.619644+00:00",
+    "final_score": 4.056,
+    "generation_log": [
+      {
+        "generation": 0,
+        "champion_id": "d4e4e537_v0",
+        "score": 3.73,
+        "versions_tested": [
+          "d4e4e537_v0"
+        ],
+        "mutation_target": null
+      },
+      {
+        "generation": 1,
+        "champion_id": "d4e4e537_v3a",
+        "score": 3.91,
+        "versions_tested": [
+          "d4e4e537_v1a",
+          "d4e4e537_v1b"
+        ],
+        "mutation_target": "strategy",
+        "promoted": null
+      },
+      {
+        "generation": 2,
+        "champion_id": "d4e4e537_v3a",
+        "score": 3.91,
+        "versions_tested": [
+          "d4e4e537_v2a",
+          "d4e4e537_v2b"
+        ],
+        "mutation_target": "strategy",
+        "promoted": null
+      },
+      {
+        "generation": 3,
+        "champion_id": "d4e4e537_v3b",
+        "score": 4.056,
+        "versions_tested": [
+          "d4e4e537_v3a",
+          "d4e4e537_v3b"
+        ],
+        "mutation_target": "objective",
+        "promoted": "d4e4e537_v3b"
+      },
+      {
+        "generation": 4,
+        "champion_id": "d4e4e537_v3b",
+        "score": 4.056,
+        "versions_tested": [
+          "d4e4e537_v4a",
+          "d4e4e537_v4b"
+        ],
+        "mutation_target": "strategy",
+        "promoted": null
+      }
+    ],
+    "generations_completed": 4,
+    "start_time": "2026-03-18T18:01:09.361535+00:00",
+    "termination_reason": "threshold_reached"
+  },
+  {
+    "id": "run_6ceccf79",
+    "all_version_ids": [
+      "6ceccf79_v0",
+      "6ceccf79_v1a",
+      "6ceccf79_v1b",
+      "6ceccf79_v2a",
+      "6ceccf79_v2b",
+      "6ceccf79_v3a",
+      "6ceccf79_v3b"
+    ],
+    "champion_id": "6ceccf79_v3b",
+    "end_time": "2026-03-20T08:37:09.052217+00:00",
+    "final_score": 4.094,
+    "generation_log": [
+      {
+        "generation": 0,
+        "champion_id": "6ceccf79_v0",
+        "score": 3.314,
+        "versions_tested": [
+          "6ceccf79_v0"
+        ],
+        "mutation_target": null
+      },
+      {
+        "generation": 1,
+        "champion_id": "6ceccf79_v1a",
+        "score": 3.806,
+        "versions_tested": [
+          "6ceccf79_v1a",
+          "6ceccf79_v1b"
+        ],
+        "mutation_target": "strategy",
+        "promoted": "6ceccf79_v1a",
+        "tactics_extracted": 18,
+        "failures_recorded": 1
+      },
+      {
+        "generation": 2,
+        "champion_id": "6ceccf79_v1a",
+        "score": 3.806,
+        "versions_tested": [
+          "6ceccf79_v2a",
+          "6ceccf79_v2b"
+        ],
+        "mutation_target": "strategy",
+        "promoted": null,
+        "tactics_extracted": 15,
+        "failures_recorded": 2
+      },
+      {
+        "generation": 3,
+        "champion_id": "6ceccf79_v3b",
+        "score": 4.094,
+        "versions_tested": [
+          "6ceccf79_v3a",
+          "6ceccf79_v3b"
+        ],
+        "mutation_target": "identity",
+        "promoted": "6ceccf79_v3b",
+        "tactics_extracted": 15,
+        "failures_recorded": 1
+      }
+    ],
+    "generations_completed": 3,
+    "start_time": "2026-03-20T07:31:18.432091+00:00",
+    "termination_reason": "threshold_reached"
+  }
+]
