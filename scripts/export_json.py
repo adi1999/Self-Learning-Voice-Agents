@@ -1,7 +1,10 @@
 """Dump all MongoDB collections to data/ as JSON files for GitHub submission."""
 
+import sys
 import json
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config.settings import ARCHIVE_DIR, CONVERSATIONS_DIR, PROJECT_ROOT
 from core.db import agent_versions_collection, conversations_collection, evolution_runs_collection
