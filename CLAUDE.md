@@ -4,15 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A platform that **automatically evolves** a debt collection voice agent's prompts through simulated conversations, automated evaluation, failure analysis, and targeted prompt mutation — without human intervention. The detailed system design is in `SYSTEM_DESIGN.md` (single source of truth for implementation).
+A platform that **automatically evolves** a debt collection voice agent through simulated conversations, automated evaluation, failure analysis, targeted prompt mutation, and persistent knowledge accumulation — without human intervention. The detailed system design is in `SYSTEM_DESIGN.md` (single source of truth for implementation).
+
+The system has two layers of self-improvement:
+1. **Prompt Evolution** — hill-climbing prompt rewriting that optimizes *what the agent says*
+2. **Strategy Playbook** — persistent knowledge layer that extracts winning tactics from high-scoring conversations and records failed mutation approaches, optimizing *what the agent knows*
 
 ## Architecture
 
 Three independent subsystems communicating through a shared data layer:
 
-1. **Evolution Engine** (text-only): simulate conversations → evaluate with 3 judges → analyze failures → mutate one prompt section → repeat
-2. **Voice Frontend**: Pipecat pipeline (SmallWebRTCTransport → DeepgramSTT → OpenAILLMService → CartesiaTTS) served via FastAPI + WebRTC
-3. **Dashboard**: HTML report with evolution tree, score charts, prompt diffs
+1. **Evolution Engine** (text-only): simulate conversations → evaluate with 5 judges → extract winning tactics → analyze failures (informed by cross-run tactics) → mutate one prompt section (with proven tactics + failed approaches from playbook) → select → record failures → repeat
+2. **Voice Frontend**: Pipecat pipeline (SmallWebRTCTransport → DeepgramSTT → OpenAILLMService → CartesiaTTS) managed as a subprocess
+3. **React Dashboard + FastAPI API**: React SPA (Vite + Tailwind) → FastAPI REST + SSE → core modules → MongoDB
 
 **Independence guarantee**: Each subsystem runs standalone. Evolution doesn't need voice. Voice just reads a prompt version from the archive.
 
@@ -25,7 +29,9 @@ simulation/      ← depends on core
 evaluation/      ← depends on core
 evolution/       ← depends on simulation, evaluation, core
 voice/           ← depends on core (+ pipecat external)
-dashboard/       ← depends on core
+api/             ← depends on core, simulation, evaluation, evolution, voice
+frontend/        ← depends on api (HTTP only)
+dashboard/       ← depends on core (HTML report generation only)
 scripts/         ← depends on everything (thin CLI wrappers)
 ```
 
@@ -33,22 +39,29 @@ scripts/         ← depends on everything (thin CLI wrappers)
 
 | Module | Responsibility |
 |--------|---------------|
-| `core/models.py` | Pydantic models: AgentVersion, Conversation, Turn, EvalResult, FailurePattern, PersonaConfig |
-| `core/archive.py` | Archive CRUD: save/load/query agent versions + conversations (JSON files in `data/`) |
-| `core/prompt_builder.py` | Assembles 6 prompt sections (identity, objective, compliance, opening, strategy, closing) into full prompt |
+| `core/models.py` | Pydantic models: AgentVersion, Conversation, Turn, EvalResult, FailurePattern, StrategyTactic, FailedApproach, PersonaConfig |
+| `core/archive.py` | Archive CRUD: save/load/query agent versions + conversations (MongoDB) |
+| `core/prompt_builder.py` | Assembles 6 prompt sections into full prompt + `build_dynamic_prompt()` injects persona-specific tactics |
+| `core/playbook.py` | MongoDB CRUD for strategy tactics and failed approaches |
 | `core/llm_client.py` | Thin wrapper over LLM API calls — single place to swap models, handle retries, track costs |
 | `config/personas.py` | 5 persona archetypes (angry, evasive, hardship, informed, cooperative) + randomization |
 | `config/settings.py` | All config: API keys, thresholds, model choices, scoring weights, generation limits |
 | `simulation/conversation.py` | Turn-by-turn ping-pong engine (agent LLM vs persona LLM) |
 | `simulation/persona_runner.py` | Batch orchestrator: runs agent against all 5 personas in parallel |
-| `evaluation/judges.py` | Three judges: GoalCompletionJudge (0-3), ConversationalQualityJudge (1-5), ComplianceJudge (pass/fail) |
+| `evaluation/judges.py` | Five judges: GoalCompletion (0-3), Quality (1-5), Compliance (pass/fail), Consistency (pass/fail), Sentiment (-1 to +1) |
 | `evaluation/scorer.py` | Aggregation: per-conversation weighted → per-persona median → aggregate mean |
 | `evolution/failure_analyzer.py` | Top 3 failure patterns mapped to prompt sections, with turn-level examples |
 | `evolution/mutator.py` | Targeted single-section rewrite, generates 2 candidates per mutation |
 | `evolution/selector.py` | Regression-aware hill climbing (no persona drops > 0.5) |
-| `evolution/loop.py` | Full evolution loop orchestrator with termination conditions |
+| `evolution/tactic_extractor.py` | LLM-based extraction of winning tactics + failure recording after selection |
+| `evolution/loop.py` | Full evolution loop orchestrator with termination conditions + playbook integration |
 | `voice/pipeline.py` | Pipecat pipeline assembly using built-in OpenAILLMService + OpenAILLMContext |
-| `voice/run_voice.py` | FastAPI server with WebRTC offer/answer endpoints |
+| `voice/run_voice.py` | FastAPI server with WebRTC offer/answer + health endpoints |
+| `api/main.py` | FastAPI app factory: lifespan, CORS, router registration |
+| `api/tasks.py` | BackgroundTaskManager: async task registry, SSE subscriber queues |
+| `api/routers/` | REST endpoints: versions, conversations, evolution, simulation, evaluation, voice, playbook, config |
+| `api/services/` | Service layer bridging routers to core modules |
+| `frontend/` | React SPA: Vite + TypeScript + Tailwind + Recharts |
 
 ## Prompt Architecture
 
@@ -61,64 +74,109 @@ The agent prompt is split into **6 sections**, each independently mutable:
 ## Evolution Loop Algorithm
 
 ```
-1. Load base prompt → create v0 → evaluate (5 personas × 3 conversations = 15 convos)
-2. Loop (max 10 generations):
-   a. Analyze failures → top 3 patterns mapped to prompt sections
-   b. Mutate highest-impact section → 2 candidate rewrites
-   c. Simulate both candidates (30 convos total)
-   d. Evaluate (3 judges × 30 convos = 90 judge calls)
-   e. Select best non-regressing candidate → promote or keep parent
-   f. Terminate if: score ≥ 4.0, or plateau (< 0.1 improvement for 3 gens), or budget hit
-   g. On plateau: diversify by targeting an untouched section
-3. Champion prompt → plug into voice pipeline
+1. Load base prompt → create v0 → simulate → evaluate → extract tactics from high-scoring convos
+2. Loop (max 5 generations):
+   a. Analyze failures → top 3 patterns mapped to prompt sections (informed by cross-run tactics)
+   b. Mutate highest-impact section → 2 candidate rewrites (with proven tactics + failed approaches from playbook)
+   c. Simulate both candidates (20 convos total, with persona-specific tactics injected into prompt)
+   d. Evaluate (5 judges × 20 convos = 100 judge calls)
+   e. Extract tactics from high-scoring candidate conversations → save to playbook
+   f. Select best non-regressing candidate → promote or keep parent
+   g. Record failed candidates as FailedApproach → save to playbook
+   h. Terminate if: score ≥ 4.0, or plateau (< 0.1 improvement for 3 gens), or budget hit
+   i. On plateau: diversify by targeting an untouched section
+3. Champion prompt + accumulated playbook tactics → plug into voice pipeline
 ```
+
+## Strategy Playbook (Persistent Knowledge)
+
+Tactics and failures persist in MongoDB across runs. Run 2 automatically benefits from run 1's knowledge.
+
+- **Tactic extraction**: Conversations scoring ≥ 3.5 → LLM extracts 1-3 reusable tactics → deduplicated → saved to `strategy_tactics`
+- **Failure recording**: Non-promoted candidates → rationale + score delta + persona regressions → saved to `failed_approaches`
+- **Injection points**: simulation (per-persona tactics in prompt), failure analysis (cross-run context), mutation (proven tactics + anti-patterns), voice pipeline (top tactics across all personas)
+- **Settings**: `TACTIC_SCORE_THRESHOLD = 3.5`, `MAX_TACTICS_PER_PROMPT = 5`
 
 ## Scoring
 
 ```
-Per-conversation: goal_completion × 0.5 + conversational_quality × 0.1 + compliance × 0.4
+Per-conversation: goal(0.35) + quality(0.15) + compliance(0.30) + consistency(0.10) + sentiment(0.10)
+  (all normalized to 0-1, then weighted, then scaled to 0-5)
 Per-persona: median of N conversation scores
 Aggregate: mean of per-persona scores
 ```
 
-Compliance weight is 0.4 to prevent the optimizer from discovering "threatening works."
+Compliance weight is 0.30 to prevent the optimizer from discovering "threatening works."
 
 ## Commands
 
 ```bash
 # Install dependencies
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
-# Run the full evolution loop
-python scripts/run_evolution.py --max-generations 10 --threshold 4.0 --conversations-per-persona 3
+# Start FastAPI backend (port 8000)
+python scripts/run_api.py
 
-# Simulate a single version (debugging)
+# Start React frontend dev server (port 3000, proxies /api to :8000)
+cd frontend && npm install && npm run dev
+
+# Production: build React and serve from FastAPI
+cd frontend && npm run build
+python scripts/run_api.py  # serves frontend/dist/ at /
+
+# CLI scripts (still work independently)
+python scripts/run_evolution.py --max-generations 5 --threshold 4.0
 python scripts/run_simulation.py --version v0
-
-# Re-evaluate existing conversation logs
 python scripts/run_eval.py --version v0
-
-# Start voice agent with a specific prompt version
 python scripts/run_voice.py --version v5
-# Opens browser at http://localhost:8000
-
-# Generate HTML evolution report
 python scripts/generate_report.py
-# Outputs: data/reports/evolution_report.html
 ```
 
 ## Environment
 
 Requires `.env` file (see `.env.example`):
-- `ANTHROPIC_API_KEY` — simulation, evaluation, failure analysis, mutation
-- `OPENAI_API_KEY` — voice pipeline LLM (lowest latency for real-time)
-- `DEEPGRAM_API_KEY` — STT
-- `CARTESIA_API_KEY` — TTS
+- `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY` — simulation, evaluation, failure analysis, mutation
+- `DEEPGRAM_API_KEY` — STT (voice only)
+- `CARTESIA_API_KEY` — TTS (voice only)
+- `MONGO_URI` — MongoDB connection string
+- `LLM_PROVIDER` — "openai" | "anthropic" | "google"
 
 ## Model Strategy
 
-- `claude-sonnet-4-6` for simulation, evaluation, analysis, and mutation (all text-based evolution work)
-- `gpt-5.4-mini` for voice pipeline only (lowest latency for real-time)
+- Evolution (simulation, evaluation, analysis, mutation) uses the model set by `LLM_PROVIDER`
+- Voice pipeline always uses `gpt-4.1-mini` (lowest latency for real-time)
+
+## API Architecture
+
+```
+React (Vite SPA, port 3000)        ← dev proxy /api → localhost:8000
+    ↓ REST + SSE
+FastAPI (port 8000)
+    ├── /api/versions/*            ← agent version CRUD
+    ├── /api/conversations/*       ← conversation queries
+    ├── /api/evolution/runs/*      ← start/stop/stream evolution
+    ├── /api/simulation/*          ← trigger + stream transcripts
+    ├── /api/evaluation/*          ← trigger evaluation
+    ├── /api/voice/*               ← start/stop pipecat + WebRTC offer proxy
+    ├── /api/playbook/*            ← accumulated tactics + failures
+    └── /api/config                ← read-only settings
+    ↓
+core/ simulation/ evaluation/ evolution/  (domain logic)
+    ↓
+MongoDB (agent_versions, conversations, evolution_runs,
+         strategy_tactics, failed_approaches)
+```
+
+### Backend Pattern
+
+- **Routers** → **Services** → **core/** (proper separation)
+- Services are stateless functions, not classes
+- FastAPI `Depends()` for DI (task_manager)
+- Long tasks (evolution, simulation) run as `asyncio.Task` via `BackgroundTaskManager`
+- SSE streaming via subscriber queues for real-time progress
+- Voice pipeline runs as subprocess on port 8001; offer proxied through main API
 
 ## Key Design Decisions
 
@@ -126,19 +184,25 @@ Requires `.env` file (see `.env.example`):
 - **Hill-climbing with 2 candidates** — basic exploration at ~2× cost instead of N× for population-based
 - **Regression detection** — prevents oscillation (improving one persona while regressing another)
 - **Separate failure analysis from mutation** — diagnosis and prescription are different skills
-- **3 conversations per persona** — median of 3 reduces LLM stochasticity noise
+- **Multiple conversations per persona** — median reduces LLM stochasticity noise
 - **Immutable compliance section** — safety rail against optimizer gaming
 - **Per-turn annotations** — gives failure analyzer surgical targets, not just holistic scores
+- **Persistent playbook over stateless mutation** — prompt rewriting alone has no memory; the mutator repeats mistakes and loses winning tactics across runs
+- **Per-persona tactic injection** — different personas need different tactics; a de-escalation tactic for angry borrowers hurts with cooperative ones
+- **Failed approach recording** — negative knowledge is as valuable as positive; prevents trying the same mutation twice
 - **Text simulation first, voice last** — evolution loop is 95% of intellectual content; voice is presentation layer
+- **React + FastAPI over Streamlit** — proper API layer, embeddable WebRTC, production-ready
 
 ## Data Layout
 
 ```
 data/
-├── archive/           # One JSON per agent version (v0.json, v1.json, ...)
-├── conversations/     # Raw conversation logs (v0_angry_001.json, ...)
+├── archive/           # Exported JSON (from export_json.py)
+├── conversations/     # Exported conversation logs
 └── reports/           # Generated HTML reports
 ```
+
+Primary data lives in MongoDB (collections: `agent_versions`, `conversations`, `evolution_runs`, `strategy_tactics`, `failed_approaches`).
 
 ## Code Conventions
 

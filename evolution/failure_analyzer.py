@@ -66,10 +66,25 @@ def _format_conversations(conversations: list[Conversation]) -> str:
     return "\n\n".join(parts)
 
 
+def _build_tactics_context() -> str:
+    """Build context from accumulated tactics to inform failure analysis."""
+    from core.playbook import get_top_tactics
+
+    tactics = get_top_tactics(limit=10)
+    if not tactics:
+        return ""
+
+    lines = ["\n\nKNOWN SUCCESSFUL TACTICS (from previous runs — consider whether failures violate these):"]
+    for t in tactics:
+        lines.append(f"  - [{t.prompt_section}] ({t.persona_type}): {t.tactic}")
+    return "\n".join(lines)
+
+
 async def analyze_failures(conversations: list[Conversation]) -> list[FailurePattern]:
     """Analyze scored conversations and return top 3 failure patterns."""
     formatted = _format_conversations(conversations)
-    prompt = FAILURE_ANALYSIS_PROMPT.format(n=len(conversations), conversations=formatted)
+    tactics_context = _build_tactics_context()
+    prompt = FAILURE_ANALYSIS_PROMPT.format(n=len(conversations), conversations=formatted) + tactics_context
 
     result = await llm_call_json(
         system="You are an expert analyst of conversational AI performance. Respond only in JSON.",

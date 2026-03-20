@@ -5,7 +5,6 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat.transports.smallwebrtc.request_handler import (
@@ -15,13 +14,13 @@ from pipecat.transports.smallwebrtc.request_handler import (
 from pipecat.transports.base_transport import TransportParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 
-from config.settings import PROJECT_ROOT
 from core.archive import get_champion, load_version
 from voice.pipeline import create_and_run_pipeline
 
 logger = logging.getLogger(__name__)
 
 _version_id: str | None = None
+_active_task: asyncio.Task | None = None
 
 
 def create_app(version_id: str | None = None) -> FastAPI:
@@ -35,6 +34,8 @@ def create_app(version_id: str | None = None) -> FastAPI:
     @app.post("/api/offer")
     async def offer(request: Request):
         """Handle WebRTC offer from the browser client."""
+        global _active_task
+
         body = await request.json()
 
         webrtc_request = SmallWebRTCRequest(
@@ -57,6 +58,17 @@ def create_app(version_id: str | None = None) -> FastAPI:
         logger.info(f"Starting voice session with {agent_version.id}")
 
         async def on_connection(webrtc_connection):
+            global _active_task
+
+            # Cancel any previous pipeline before starting a new one
+            if _active_task is not None and not _active_task.done():
+                logger.info("Cancelling previous pipeline task before new connection")
+                _active_task.cancel()
+                try:
+                    await _active_task
+                except asyncio.CancelledError:
+                    pass
+
             transport = SmallWebRTCTransport(
                 webrtc_connection=webrtc_connection,
                 params=TransportParams(
@@ -66,14 +78,15 @@ def create_app(version_id: str | None = None) -> FastAPI:
                     vad_analyzer=SileroVADAnalyzer(),
                 ),
             )
-            await create_and_run_pipeline(agent_version, transport, version_id=agent_version.id)
+            _active_task = await create_and_run_pipeline(
+                agent_version, transport, version_id=agent_version.id,
+            )
 
         answer = await request_handler.handle_web_request(webrtc_request, on_connection)
         return JSONResponse(answer)
 
-    # Mount static files for the browser client
-    static_dir = PROJECT_ROOT / "static"
-    if static_dir.exists():
-        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+    @app.get("/health")
+    async def health():
+        return {"status": "ok"}
 
     return app

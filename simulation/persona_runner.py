@@ -6,7 +6,7 @@ import logging
 from config.personas import randomize_persona
 from config.settings import CONVERSATIONS_PER_PERSONA, PERSONA_ARCHETYPES
 from core.models import AgentVersion, Conversation
-from core.prompt_builder import build_prompt
+from core.prompt_builder import build_dynamic_prompt
 from simulation.conversation import simulate_conversation
 
 logger = logging.getLogger(__name__)
@@ -17,10 +17,9 @@ async def run_full_evaluation_suite(
     conversations_per_persona: int = CONVERSATIONS_PER_PERSONA,
 ) -> list[Conversation]:
     """Run agent against all 5 personas, N conversations each — in parallel."""
-    agent_prompt = build_prompt(agent_version.prompt_sections)
-
     tasks = []
     for archetype in PERSONA_ARCHETYPES:
+        agent_prompt = build_dynamic_prompt(agent_version.prompt_sections, archetype)
         for run in range(conversations_per_persona):
             persona_config = randomize_persona(archetype)
             tasks.append(

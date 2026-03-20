@@ -89,6 +89,32 @@ class FailurePattern(BaseModel):
     suggested_direction: str
 
 
+class StrategyTactic(BaseModel):
+    id: str
+    persona_type: str
+    prompt_section: str
+    tactic: str
+    example_turns: list[TurnReference]
+    score_impact: float
+    source_version_id: str
+    source_run_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class FailedApproach(BaseModel):
+    id: str
+    target_section: str
+    description: str
+    failure_reason: Literal["no_improvement", "regression", "not_selected"]
+    parent_version_id: str
+    candidate_version_id: str
+    score_before: float
+    score_after: float
+    persona_regressions: dict[str, float] = Field(default_factory=dict)
+    source_run_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class AgentVersion(BaseModel):
     id: str
     run_id: str | None = None

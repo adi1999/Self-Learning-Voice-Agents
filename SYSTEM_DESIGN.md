@@ -17,10 +17,12 @@
 9. [Mutation Strategy](#9-mutation-strategy)
 10. [Selection & Promotion](#10-selection--promotion)
 11. [Evolution Loop Orchestration](#11-evolution-loop-orchestration)
-12. [Pipecat Voice Pipeline](#12-pipecat-voice-pipeline)
-13. [Streamlit Dashboard](#13-streamlit-dashboard)
-14. [Configuration & Environment](#14-configuration--environment)
-15. [Key Design Decisions](#15-key-design-decisions)
+12. [Strategy Playbook (Persistent Knowledge)](#12-strategy-playbook-persistent-knowledge)
+13. [Pipecat Voice Pipeline](#13-pipecat-voice-pipeline)
+14. [FastAPI Backend](#14-fastapi-backend)
+15. [React Frontend](#15-react-frontend)
+16. [Configuration & Environment](#16-configuration--environment)
+17. [Key Design Decisions](#17-key-design-decisions)
 
 ---
 
@@ -31,19 +33,24 @@ Three independent subsystems communicating through MongoDB:
 ```
 ┌─────────────────────────────────────────────────────┐
 │                  MONGODB (shared data)               │
-│    agent_versions  ·  conversations  ·  evolution_runs│
+│  agent_versions · conversations · evolution_runs      │
+│  strategy_tactics · failed_approaches                 │
 └──────────┬──────────────┬──────────────┬────────────┘
            │              │              │
     ┌──────▼──────┐ ┌─────▼──────┐ ┌────▼─────────┐
-    │  EVOLUTION  │ │   VOICE    │ │  STREAMLIT   │
-    │   ENGINE    │ │  FRONTEND  │ │  DASHBOARD   │
+    │  EVOLUTION  │ │   VOICE    │ │ REACT + API  │
+    │   ENGINE    │ │  PIPELINE  │ │  DASHBOARD   │
     └─────────────┘ └────────────┘ └──────────────┘
 ```
 
 **Independence guarantee**: Each subsystem runs standalone.
 - Evolution engine runs text-only simulations — no voice dependency
-- Voice frontend reads a prompt version from the archive — no evolution dependency
-- Streamlit dashboard reads from MongoDB — no dependency on either
+- Voice pipeline reads a prompt version from the archive + top tactics from the playbook — no evolution dependency
+- React dashboard reads/writes via FastAPI API — no direct dependency on either
+
+**Two layers of self-improvement**:
+1. **Prompt Evolution** — hill-climbing prompt rewriting (optimizes *what the agent says*)
+2. **Strategy Playbook** — persistent knowledge that accumulates across generations and across runs (optimizes *what the agent knows*)
 
 ### Dependency Flow (strict, no circular deps)
 
@@ -54,7 +61,9 @@ simulation/      ← depends on core
 evaluation/      ← depends on core
 evolution/       ← depends on simulation, evaluation, core
 voice/           ← depends on core (+ pipecat external)
-dashboard/       ← depends on core
+api/             ← depends on core, simulation, evaluation, evolution, voice
+frontend/        ← depends on api (HTTP only)
+dashboard/       ← depends on core (HTML report generation only)
 scripts/         ← depends on everything (thin CLI wrappers)
 ```
 
@@ -63,7 +72,6 @@ scripts/         ← depends on everything (thin CLI wrappers)
 ## 2. Directory Structure
 
 ```
-├── app.py                          # Streamlit UI (5 pages)
 ├── config/
 │   ├── settings.py                 # All config: API keys, thresholds, weights, model choices
 │   └── personas.py                 # 5 persona archetypes + randomization (Indian context)
@@ -71,7 +79,8 @@ scripts/         ← depends on everything (thin CLI wrappers)
 │   ├── models.py                   # Pydantic models: AgentVersion, Conversation, EvalResult, etc.
 │   ├── db.py                       # MongoDB connection + collection references
 │   ├── archive.py                  # Archive CRUD (agent versions, conversations, evolution runs)
-│   ├── prompt_builder.py           # Assembles 6 sections → full system prompt
+│   ├── prompt_builder.py           # Assembles 6 sections → full system prompt + dynamic prompt with tactics
+│   ├── playbook.py                # MongoDB CRUD for strategy tactics + failed approaches
 │   └── llm_client.py              # LLM wrapper: OpenAI / Anthropic / Google, retries, cost tracking
 ├── simulation/
 │   ├── conversation.py             # Turn-by-turn ping-pong engine (agent LLM ↔ persona LLM)
@@ -82,28 +91,78 @@ scripts/         ← depends on everything (thin CLI wrappers)
 │   ├── scorer.py                   # Score aggregation: per-conversation → per-persona → aggregate
 │   └── annotator.py               # Per-turn annotation extraction
 ├── evolution/
-│   ├── failure_analyzer.py         # Top 3 failure patterns → target prompt section
-│   ├── mutator.py                  # Targeted single-section rewrite (2 candidates)
+│   ├── failure_analyzer.py         # Top 3 failure patterns → target prompt section (informed by cross-run tactics)
+│   ├── mutator.py                  # Targeted single-section rewrite (2 candidates, with playbook context)
 │   ├── selector.py                 # Regression-aware hill climbing
-│   └── loop.py                     # Full evolution loop orchestrator
+│   ├── tactic_extractor.py        # LLM-based extraction of winning tactics + failure recording
+│   └── loop.py                     # Full evolution loop orchestrator + playbook integration
 ├── voice/
 │   ├── pipeline.py                 # Pipecat: SmallWebRTCTransport + OpenAILLMService + ConversationLogger
-│   └── run_voice.py               # FastAPI server with WebRTC signaling
+│   └── run_voice.py               # FastAPI server with WebRTC signaling + health endpoint
+├── api/
+│   ├── main.py                     # App factory: lifespan, CORS, router registration
+│   ├── dependencies.py             # DI: get_task_manager()
+│   ├── exceptions.py               # Custom exceptions + global handlers (NotFound → 404, etc.)
+│   ├── tasks.py                    # BackgroundTaskManager: task registry, SSE subscriber queues
+│   ├── schemas/                    # Pydantic request/response models
+│   │   ├── common.py               # ErrorResponse, TaskResponse
+│   │   ├── versions.py             # AgentVersionSummary
+│   │   ├── conversations.py        # ConversationSummary, ConversationFilters
+│   │   ├── evolution.py            # StartEvolutionRequest, EvolutionProgress
+│   │   ├── simulation.py           # SimulateRequest, SimulationProgress
+│   │   └── evaluation.py           # EvaluateRequest
+│   ├── routers/                    # REST endpoint definitions
+│   │   ├── versions.py             # GET /, GET /{id}, GET /champion
+│   │   ├── conversations.py        # GET / (filtered), GET /{id}
+│   │   ├── evolution.py            # GET/POST /runs, GET /runs/{id}/stream, DELETE /runs/{id}
+│   │   ├── simulation.py           # POST /, GET /{id}/stream
+│   │   ├── evaluation.py           # POST /
+│   │   ├── voice.py                # GET /status, POST /start, POST /stop, POST /offer
+│   │   ├── playbook.py             # GET /tactics, GET /tactics/{persona}, GET /failures, GET /stats
+│   │   └── config.py               # GET /
+│   └── services/                   # Stateless service functions bridging routers → core
+│       ├── version_service.py      # Wraps core/archive.py version functions
+│       ├── conversation_service.py # Wraps core/archive.py conversation functions
+│       ├── evolution_service.py    # Bridges evolution/loop.py → BackgroundTaskManager + SSE
+│       ├── simulation_service.py   # Bridges simulation/conversation.py → SSE
+│       ├── evaluation_service.py   # Wraps evaluation judges + save
+│       ├── voice_service.py        # Manages pipecat subprocess lifecycle (start/stop/health poll)
+│       └── playbook_service.py    # Wraps core/playbook.py for API layer
+├── frontend/
+│   ├── vite.config.ts              # Proxy /api → localhost:8000
+│   └── src/
+│       ├── App.tsx                  # React Router, 6 routes
+│       ├── api/client.ts           # Typed fetch wrappers for all endpoints
+│       ├── hooks/useSSE.ts         # Custom hook wrapping EventSource
+│       ├── pages/
+│       │   ├── Personas.tsx         # 5 cards, simulate, live transcript, eval scores
+│       │   ├── Evolution.tsx        # Config form, start, SSE progress log, score chart
+│       │   ├── Conversations.tsx    # Filters + expandable table with transcripts
+│       │   ├── Archive.tsx          # Version list, prompt diffs, per-persona scores
+│       │   ├── VoiceAgent.tsx       # Start/stop server, native WebRTC call, history
+│       │   └── Playbook.tsx        # Accumulated tactics + failures, stats by persona/section
+│       └── components/
+│           ├── Layout.tsx           # Sidebar nav + content area
+│           ├── PersonaCard.tsx      # Single persona card
+│           ├── TranscriptView.tsx   # Turn-by-turn chat display with annotations
+│           ├── EvalBreakdown.tsx    # 5-metric score table
+│           ├── ScoreChart.tsx       # Recharts line chart (aggregate + per-persona)
+│           ├── PromptDiff.tsx       # Side-by-side before/after diff
+│           ├── ProgressLog.tsx      # Auto-scrolling SSE-fed terminal log
+│           └── VersionSelector.tsx  # Reusable version dropdown
 ├── dashboard/
-│   ├── streamlit_helpers.py        # Shared UI components (transcripts, scores, badges)
-│   ├── tree_visualizer.py          # Agent lineage DAG (Mermaid)
-│   ├── score_charts.py            # Score progression charts (Plotly)
-│   ├── diff_viewer.py             # Prompt section diffs between generations
-│   └── report_generator.py        # Static HTML report generation
+│   ├── report_generator.py         # Static HTML report orchestration
+│   ├── score_charts.py            # Score visualization
+│   ├── tree_visualizer.py          # Mermaid evolution tree diagram
+│   └── diff_viewer.py             # Prompt diffs between versions
 ├── prompts/
 │   └── base_v0.yaml               # Handcrafted seed prompt (6 sections, Indian NBFC context)
-├── static/
-│   └── index.html                  # WebRTC browser client for voice agent
 ├── scripts/
+│   ├── run_api.py                  # CLI: start FastAPI server (uvicorn)
 │   ├── run_evolution.py            # CLI: full evolution loop
 │   ├── run_simulation.py           # CLI: simulate one version
 │   ├── run_eval.py                 # CLI: evaluate conversations
-│   ├── run_voice.py               # CLI: start voice agent
+│   ├── run_voice.py               # CLI: start voice agent (standalone)
 │   ├── generate_report.py         # CLI: generate HTML report
 │   └── export_json.py             # CLI: dump MongoDB → JSON
 └── data/                           # Exported JSON data
@@ -123,6 +182,7 @@ All models live in `core/models.py` using Pydantic.
 ```python
 class AgentVersion(BaseModel):
     id: str                                    # "v0", "run123_v1a", ...
+    run_id: str | None                         # Evolution run this belongs to
     parent_id: str | None                      # None for base version
     generation: int                            # 0 for base, increments each generation
     prompt_sections: dict[str, str]            # Keys: identity, objective, compliance,
@@ -158,7 +218,7 @@ class Conversation(BaseModel):
     id: str
     agent_version_id: str
     persona_type: str | None                   # None for live voice conversations
-    persona_config: PersonaConfig | None       # None for live voice conversations
+    persona_config: PersonaConfig | None
     source: Literal["simulation", "voice_live"]
     turns: list[Turn]
     outcome: Literal["success", "rejection", "hallucination", "timeout", "ended_by_user"]
@@ -171,7 +231,7 @@ class Turn(BaseModel):
     index: int
     role: Literal["agent", "borrower"]
     content: str
-    timestamp: datetime | None = None          # Useful for live voice
+    timestamp: datetime | None = None
     annotations: list[TurnAnnotation] = []
 
 class PersonaConfig(BaseModel):
@@ -180,31 +240,18 @@ class PersonaConfig(BaseModel):
     loan_amount: float                         # ₹25,000–₹5,00,000
     months_overdue: int                        # 2-18
     backstory: str                             # Randomized snippet
-
-class ConversationMetadata(BaseModel):
-    model_used: str
-    total_tokens: int | None = None
-    duration_seconds: float | None = None
-    cost_estimate_usd: float | None = None
 ```
 
 ### EvalResult
 
 ```python
 class EvalResult(BaseModel):
-    # Core metrics
     goal_completion: float                     # 0-3
     conversational_quality: float              # 1-5
     compliance: float                          # 0 or 1
-
-    # Extended metrics
     response_consistency: float                # 0 or 1 (pass/fail)
     sentiment_shift: float                     # -1.0 to +1.0
-
-    # Aggregate
     weighted_total: float
-
-    # Detail
     turn_annotations: list[TurnAnnotation]
     hallucinations_found: list[str]
     tone_assessment: str
@@ -219,12 +266,41 @@ class FailurePattern(BaseModel):
     target_section: str                        # Which prompt section is responsible
     example_turns: list[TurnReference]         # Specific turn references
     suggested_direction: str                   # Direction of fix (not the fix itself)
-
-class TurnReference(BaseModel):
-    conversation_id: str
-    turn_index: int
-    content: str
 ```
+
+### StrategyTactic (Playbook)
+
+```python
+class StrategyTactic(BaseModel):
+    id: str                                    # "tactic_{uuid8}"
+    persona_type: str                          # "angry", "evasive", etc.
+    prompt_section: str                        # Which section this relates to
+    tactic: str                                # 1-3 sentence description of what worked
+    example_turns: list[TurnReference]
+    score_impact: float                        # weighted_total of source conversation
+    source_version_id: str
+    source_run_id: str | None
+    created_at: datetime
+```
+
+### FailedApproach (Playbook)
+
+```python
+class FailedApproach(BaseModel):
+    id: str                                    # "fail_{uuid8}"
+    target_section: str                        # Which section was mutated
+    description: str                           # What was tried (from candidate.rationale)
+    failure_reason: Literal["no_improvement", "regression", "not_selected"]
+    parent_version_id: str
+    candidate_version_id: str
+    score_before: float
+    score_after: float
+    persona_regressions: dict[str, float]      # persona -> score delta (negative)
+    source_run_id: str | None
+    created_at: datetime
+```
+
+MongoDB collections `strategy_tactics` and `failed_approaches` are append-only — they accumulate knowledge across runs.
 
 ---
 
@@ -247,33 +323,17 @@ The agent prompt is split into 6 sections, each independently mutable:
 
 - Each section maps to a **distinct failure mode** → enables targeted mutation
 - COMPLIANCE is **immutable** — prevents the optimizer from discovering "threatening works"
-- Sections are independently evaluable — if compliance fails, you know which section is responsible
+- Sections are independently evaluable
 - Prompt diffs between versions are readable (only one section changes per generation)
 
 ### Prompt Assembly
 
-`core/prompt_builder.py` concatenates sections with headers:
+`core/prompt_builder.py` provides two assembly modes:
 
-```python
-def build_prompt(sections: dict[str, str]) -> str:
-    return f"""## IDENTITY
-{sections['identity']}
+- **`build_prompt(sections)`** — Static assembly: concatenates sections with markdown headers. Used as the base for all prompts.
+- **`build_dynamic_prompt(sections, persona_type)`** — Dynamic assembly: starts with `build_prompt`, then queries the playbook for the top 5 tactics matching the persona type and appends a `## LEARNED TACTICS` section. Used during simulation and by the voice pipeline.
 
-## OBJECTIVE
-{sections['objective']}
-
-## COMPLIANCE RULES
-{sections['compliance']}
-
-## OPENING THE CALL
-{sections['opening']}
-
-## STRATEGY & OBJECTION HANDLING
-{sections['strategy']}
-
-## CLOSING THE CALL
-{sections['closing']}"""
-```
+This means the agent's live behavior reflects accumulated knowledge from all previous runs, not just the static prompt text.
 
 ---
 
@@ -293,37 +353,7 @@ Defined in `config/personas.py`. Indian names, Rs. amounts, EMI terminology, NBF
 
 ### Randomization
 
-Each conversation gets randomized surface details to prevent overfitting:
-
-```python
-def randomize_persona(archetype: str) -> PersonaConfig:
-    return PersonaConfig(
-        archetype=archetype,
-        name=random.choice(NAMES_POOL),              # 50+ Indian names
-        loan_amount=random.uniform(25000, 500000),    # ₹25K–₹5L
-        months_overdue=random.randint(2, 18),
-        backstory=random.choice(BACKSTORIES[archetype]) # 5+ per archetype
-    )
-```
-
-### Persona Prompt Structure
-
-```
-You are role-playing as a loan defaulter receiving a debt collection call.
-
-NAME: {name}
-SITUATION: You owe ₹{amount} on a personal loan EMI, {months} months overdue.
-BACKSTORY: {backstory}
-
-YOUR PERSONALITY: {archetype_specific_behavior}
-
-RULES:
-- Stay in character throughout the conversation
-- React naturally to what the agent says
-- If the conversation reaches a natural conclusion, include [END:reason]
-  where reason is one of: agreed_to_pay, hung_up, asked_to_stop, callback_agreed
-- Do not break character to explain your reasoning
-```
+Each conversation gets randomized surface details to prevent overfitting (name, loan amount, months overdue, backstory).
 
 ### COOPERATIVE as Ceiling Detector
 
@@ -335,34 +365,23 @@ If the agent can't close a cooperative borrower, the base prompt is fundamentall
 
 ### Turn-by-Turn Ping-Pong
 
-`simulation/conversation.py` runs a two-party conversation where each side maintains its own message history:
-
-```
-Agent LLM (system: agent prompt)     ←→     Persona LLM (system: persona prompt)
-         ↓                                            ↓
-    Agent turn 1  ──────────────────►  Persona receives, responds
-    Agent receives ◄──────────────────  Persona turn 1
-    Agent turn 2  ──────────────────►  Persona receives, responds
-         ...                                          ...
-    [END detected or max turns hit]
-```
-
-The agent sees persona messages as "user" messages and vice versa.
+`simulation/conversation.py` runs a two-party conversation where each side maintains its own message history. The agent sees persona messages as "user" messages and vice versa.
 
 ### Termination Detection
 
-`simulation/termination.py`:
-- Parse `[END:reason]` from the last line of any response
-- Valid reasons: `agreed_to_pay`, `hung_up`, `asked_to_stop`, `callback_agreed`
-- Hard cap: 20 turns (configurable)
+`simulation/termination.py`: Parse `[END:reason]` signals. Valid reasons: `agreed_to_pay`, `hung_up`, `asked_to_stop`, `callback_agreed`. Hard cap: 20 turns.
 
 ### Batch Orchestration
 
-`simulation/persona_runner.py` runs all 5 personas × N conversations in parallel using `asyncio.gather`, with a semaphore for rate limiting.
+`simulation/persona_runner.py` runs all 5 personas × N conversations in parallel using `asyncio.gather`. Each persona's conversations use `build_dynamic_prompt()` to inject persona-specific tactics from the playbook into the agent's system prompt.
+
+### Token Usage
+
+Both the simulation engine and the voice pipeline use stateless LLM APIs. The **full conversation history is resent with every turn** — there is no server-side session. In a 20-turn conversation, turn 20's API call includes turns 1–19 plus the system prompt. This is the standard approach for Chat Completions-style APIs. Possible optimizations include sliding-window context, periodic summarization, or leveraging provider-side prompt caching.
 
 ### Live UI Updates
 
-`simulate_conversation` accepts an optional `on_turn` callback for Streamlit live transcript updates.
+`simulate_conversation` accepts an optional `on_turn` callback. The API service layer pushes turns into BackgroundTaskManager subscriber queues for SSE streaming.
 
 ---
 
@@ -372,51 +391,13 @@ The agent sees persona messages as "user" messages and vice versa.
 
 Each judge is a separate LLM call with a specialized rubric.
 
-#### Judge 1: Goal Completion (0–3)
-
-```
-3 = Borrower agreed to full payment or plan with specific terms
-2 = Borrower agreed to partial payment or reduced arrangement
-1 = Borrower agreed to callback at specific date/time
-0 = No commitment obtained
-```
-
-#### Judge 2: Conversational Quality (1–5)
-
-Scores across dimensions:
-- **Repetition** (-1 per instance, max -3)
-- **Acknowledgment** (+1 per instance, max +3) — referencing borrower's actual words, not generic "I understand"
-- **Specificity** (+1 per instance, max +2) — concrete numbers, dates, plan names
-- **Tone consistency** (+1 if maintained, 0 if breaks) — appropriate for the persona type
-- **Hallucination check** (-2 per instance) — made-up programs, incorrect amounts, false legal claims
-
-Final score: 3 (baseline) + adjustments, clamped to [1, 5]
-
-#### Judge 3: Compliance (pass/fail)
-
-Single violation = FAIL:
-- Threatening arrest, jail, or salary deduction
-- Misrepresenting loan amount or legal status
-- Refusing to provide account details when requested
-- Using profanity, insults, or demeaning language
-- Continuing after borrower says "stop calling"
-- Contacting family, employer, or references
-- Impersonating legal authority
-
-#### Judge 4: Response Consistency (pass/fail)
-
-Checks for self-contradictions:
-- Different loan amounts at different points
-- Conflicting payment plan terms
-- Claiming something possible then denying it later
-- Incorrect borrower information repetition
-
-#### Judge 5: Sentiment Shift (-1.0 to +1.0)
-
-Compares borrower's emotional state in first 3 vs last 3 turns:
-- +1.0 = Significantly more positive/cooperative
-- 0.0 = No change
-- -1.0 = Significantly more angry/hostile
+| Judge | Range | What It Measures |
+|-------|-------|-----------------|
+| Goal Completion | 0–3 | Did the borrower commit to paying? |
+| Conversational Quality | 1–5 | Repetition, acknowledgment, specificity, tone, hallucinations |
+| Compliance | 0 or 1 | Any legal/ethical violations? Single violation = fail |
+| Response Consistency | 0 or 1 | Does the agent contradict itself? |
+| Sentiment Shift | -1 to +1 | Did the borrower's sentiment improve? |
 
 ### Score Aggregation
 
@@ -434,40 +415,19 @@ SCORING_WEIGHTS = {
 # Aggregate: mean of per-persona scores
 ```
 
-### Simulated vs Voice Conversations
-
-- **Simulated**: All 5 metrics scored automatically after completion
-- **Voice (live)**: Saved without eval scores; user clicks "Evaluate" in UI to run judges on the transcript
-
 ---
 
 ## 8. Failure Analysis
 
-The bridge between evaluation and mutation. Raw scores tell you "what happened." Failure analysis tells you "why" and "what to change."
+`evolution/failure_analyzer.py` bridges evaluation and mutation. Raw scores tell you "what happened." Failure analysis tells you "why" and "what to change."
 
-`evolution/failure_analyzer.py`:
+Output: Top 3 `FailurePattern` objects, each with description, target section, example turns, and suggested direction.
 
-```
-INPUT:
-  - All scored conversations for the current champion
-  - Per-turn annotations from judges
-  - Compliance failures
-  - Outcome flags (rejection/timeout)
-
-OUTPUT:
-  - Top 3 FailurePattern objects, each with:
-    - description: one-sentence summary
-    - target_section: which prompt section is responsible (never compliance)
-    - example_turns: 2-3 specific turn excerpts
-    - suggested_direction: what to fix (NOT the fix itself)
-```
+The analyzer is also informed by **cross-run accumulated tactics** from the playbook. Known successful tactics are appended to the analysis prompt so the analyzer can detect when failures violate proven approaches — connecting current problems to past solutions.
 
 ### Why Separate Analysis from Mutation
 
-The analyzer diagnoses. The mutator prescribes. Combining them leads to:
-- Sloppy mutations that don't address root cause
-- Mutations too reactive to a single bad conversation
-- Loss of explainability
+The analyzer diagnoses. The mutator prescribes. Combining them leads to sloppy mutations and loss of explainability.
 
 ---
 
@@ -477,15 +437,15 @@ The analyzer diagnoses. The mutator prescribes. Combining them leads to:
 
 **Core principle**: Mutate one thing at a time. If you change two sections and the score goes up, you don't know which change helped.
 
-`evolution/mutator.py` receives the full prompt (for context), the target section, the failure analysis, and constraints. It produces a complete rewrite of that one section plus a rationale.
+2 candidates per mutation — run the mutation prompt twice (temperature > 0) for basic exploration.
 
-### 2 Candidates Per Mutation
+### Playbook-Informed Mutation
 
-Run the mutation prompt twice (temperature > 0) to get 2 different rewrites. Basic exploration without full population-based search. Cost: 2 extra LLM calls — negligible vs simulation cost.
+The mutation prompt is enriched with context from the strategy playbook:
+- **Proven tactics** for the target section — "these worked before, incorporate them"
+- **Failed approaches** for the target section — "these were tried and failed, avoid them"
 
-### Section Selection
-
-Target the `target_section` of the highest-impact failure pattern (#1 from analyzer). If the same section has been mutated 2+ times without improvement, force-select a different section (diversification).
+This is not a new LLM call — it's just additional context injected into the existing mutation prompt. The mutator gets both positive examples (what to do) and negative examples (what not to repeat), making each mutation more informed than the last.
 
 ---
 
@@ -493,104 +453,104 @@ Target the `target_section` of the highest-impact failure pattern (#1 from analy
 
 ### Regression-Aware Hill Climbing
 
-`evolution/selector.py`:
+```
+Candidate must:
+1. Improve aggregate score over parent
+2. Not regress any persona by > 0.5 points
 
-```python
-def select_champion(parent, candidates, max_regression=0.5):
-    """
-    Returns best candidate if it beats parent WITHOUT regression.
-    Returns None if no candidate qualifies (parent stays champion).
-    """
-    for candidate in candidates:
-        # Must improve aggregate score
-        if candidate.scores.aggregate <= parent.scores.aggregate:
-            continue
-
-        # No persona can drop more than max_regression
-        regressed = any(
-            parent.scores.per_persona[p].weighted_total -
-            candidate.scores.per_persona[p].weighted_total > max_regression
-            for p in PERSONA_ARCHETYPES
-        )
-
-        if not regressed:
-            return candidate  # (simplified — actual picks best among qualifying)
-
-    return None
+If no candidate qualifies → parent stays champion, both candidates archived
 ```
 
-### Why Regression Detection
-
-Without it, the loop oscillates:
-- Gen 1: Improve angry handling (rewrite strategy)
-- Gen 2: Evasive handling broke (strategy changes conflicted)
-- Gen 3: Fix evasive, break angry again
-
-The regression guard ensures monotonic improvement across ALL personas.
-
-### Promotion Flow
-
-```
-Parent (champion) → Failure Analysis → 2 Candidates generated
-                                       ↓
-                              Simulate + Evaluate both
-                                       ↓
-                         Select best non-regressing candidate
-                                       ↓
-                    ┌──── If found ────────┬──── If not ────┐
-                    ↓                                       ↓
-          Promote candidate                          Keep parent
-          Archive parent + loser                     Archive both candidates
-```
+This ensures **monotonic improvement across all personas**, not just the aggregate.
 
 ---
 
 ## 11. Evolution Loop Orchestration
 
-### Full Pipeline
-
 `evolution/loop.py`:
 
 ```
 INIT:
-  Load base prompt from prompts/base_v0.yaml
-  Create AgentVersion v0 (generation=0, status="base")
-  Simulate: 5 personas × N conversations
-  Evaluate all conversations → store scores in v0
-  Set champion = v0
+  Load base prompt → create v0 → simulate → evaluate
+  → extract tactics from high-scoring v0 conversations → set champion
 
-LOOP (max_generations, default 5):
-  1. ANALYZE    — failure patterns from champion's conversations
-  2. TARGET     — highest-impact section (force different if stuck)
-  3. MUTATE     — 2 candidate rewrites of target section
-  4. SIMULATE   — N conversations per persona per candidate
-  5. EVALUATE   — 5 judges per conversation
-  6. SELECT     — best non-regressing candidate
-  7. LOG        — save all versions to MongoDB, print summary
-  8. TERMINATE? — score ≥ threshold, or plateau, or budget hit
-  9. DIVERSIFY  — on plateau: target untouched section, try once more
+LOOP (max_generations):
+  1. ANALYZE     — failure patterns from champion's conversations (with cross-run tactic context)
+  2. TARGET      — highest-impact section (force different if stuck)
+  3. MUTATE      — 2 candidate rewrites (with proven tactics + failed approaches from playbook)
+  4. SIMULATE    — N conversations per persona per candidate (with persona-specific tactics in prompt)
+  5. EVALUATE    — 5 judges per conversation
+  6. EXTRACT     — winning tactics from high-scoring candidate conversations → save to playbook
+  7. SELECT      — best non-regressing candidate
+  8. RECORD      — failed candidates as FailedApproach → save to playbook
+  9. TERMINATE?  — score ≥ threshold, or plateau, or budget hit
+  10. DIVERSIFY  — on plateau: target untouched section
 
 POST-LOOP:
   Champion = highest-scoring promoted version
-  Save champion ID for voice pipeline
+  Playbook = accumulated tactics + failures from all generations
 ```
 
 ### Resume Support
 
-The loop saves run metadata after every generation. If a run fails mid-way, it can be resumed from the Streamlit UI — it detects incomplete runs, rebuilds state from MongoDB, and skips completed work.
-
-### Start from Champion
-
-New evolution runs can start from the previous champion's prompt (default) or from the base prompt.
+The loop saves run metadata after every generation. Incomplete runs can be resumed — it detects incomplete state, rebuilds from MongoDB, and skips completed work.
 
 ---
 
-## 12. Pipecat Voice Pipeline
+## 12. Strategy Playbook (Persistent Knowledge)
+
+### Motivation
+
+Prompt rewriting alone is the shallowest form of self-modification. Each mutation starts from scratch — if the mutator tried something in generation 2 that failed, it might try the exact same thing in generation 4. If a conversation scored 4.5 because the agent used a specific de-escalation tactic, that insight dies with the conversation. The system rewrites *instructions* but never accumulates *knowledge*.
+
+The strategy playbook adds persistent memory: **what worked** (reusable tactics) and **what failed** (anti-patterns). Both accumulate across generations and across runs in MongoDB, making the system genuinely learn from experience.
+
+### Tactic Extraction (`evolution/tactic_extractor.py`)
+
+After every evaluation, conversations scoring ≥ 3.5 (`TACTIC_SCORE_THRESHOLD`) are analyzed by an LLM call that extracts 1-3 specific, reusable tactics. Each tactic is:
+- Tied to a **persona type** (angry, evasive, etc.) and a **prompt section**
+- Deduplicated against existing tactics for that persona (LLM sees existing tactics and returns empty array if no new ones)
+- Saved to `strategy_tactics` collection with the source conversation's score as `score_impact`
+
+### Failure Recording
+
+After selection, every non-promoted candidate is recorded as a `FailedApproach`:
+- What was tried (the candidate's `rationale`)
+- Why it failed (`no_improvement` or `regression`)
+- Score delta and per-persona regressions
+
+This is pure bookkeeping — no LLM call needed.
+
+### Injection Points
+
+The playbook feeds into the evolution loop at 4 points — all by enriching existing prompts, not by adding new LLM calls:
+
+| Where | What Gets Injected | How |
+|-------|-------------------|-----|
+| **Simulation** (`persona_runner.py`) | Top 5 tactics for each persona type | `build_dynamic_prompt()` appends `## LEARNED TACTICS` section |
+| **Failure Analysis** (`failure_analyzer.py`) | Top 10 tactics across all personas | Appended to the analysis prompt as "known successful tactics" |
+| **Mutation** (`mutator.py`) | Top 5 tactics + top 5 failures for the target section | Injected as "PROVEN TACTICS" and "FAILED APPROACHES" blocks |
+| **Voice Pipeline** (`pipeline.py`) | Top 5 tactics across all personas | Appended to the voice prompt |
+
+### Cross-Run Learning
+
+Tactics and failures persist in MongoDB. Run 2 automatically benefits from run 1's extracted knowledge. No manual intervention, no configuration — the playbook grows monotonically.
+
+### Settings
+
+```python
+TACTIC_SCORE_THRESHOLD = 3.5    # Minimum weighted_total to extract tactics from a conversation
+MAX_TACTICS_PER_PROMPT = 5      # Max tactics injected into a single prompt
+```
+
+---
+
+## 13. Pipecat Voice Pipeline
 
 ### Architecture
 
 ```
-Browser (index.html) ←── WebRTC ──→ SmallWebRTCTransport
+Browser (React VoiceAgent page) ←── WebRTC ──→ SmallWebRTCTransport
        ↓
   [STT: Deepgram] ──── speech → text
        ↓
@@ -603,61 +563,115 @@ Browser (index.html) ←── WebRTC ──→ SmallWebRTCTransport
 
 ### Pipeline Assembly
 
-`voice/pipeline.py` uses Pipecat's built-in services (no custom LLM service):
-
-```python
-from pipecat.services.openai.llm import OpenAILLMService
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-
-async def create_voice_pipeline(agent_version, transport):
-    system_prompt = build_prompt(agent_version.prompt_sections)
-    context = OpenAILLMContext(
-        messages=[{"role": "system", "content": system_prompt}]
-    )
-
-    llm = OpenAILLMService(api_key=..., model="gpt-4.1-mini")
-    context_aggregator = llm.create_context_aggregator(context)
-
-    stt = DeepgramSTTService(api_key=...)
-    tts = CartesiaTTSService(api_key=..., voice_id="...")
-
-    pipeline = Pipeline([
-        transport.input(),
-        stt,
-        context_aggregator.user(),
-        llm,
-        tts,
-        transport.output(),
-        context_aggregator.assistant()
-    ])
-    return pipeline
-```
+`voice/pipeline.py` uses Pipecat's built-in services. The evolved prompt is injected as the system message in `OpenAILLMContext`, enriched with top tactics from the playbook (across all personas, since the voice agent doesn't know the caller's persona type in advance).
 
 ### Conversation Logging
 
 `ConversationLoggerProcessor` captures turns from the voice pipeline and saves them to MongoDB with `source: "voice_live"`.
 
-### Server
+### Voice Context Override
 
-`voice/run_voice.py` — FastAPI server with WebRTC signaling. Browser client at `static/index.html` uses the Pipecat JS SDK. Everything runs locally, no cloud infra needed.
+The voice pipeline loads a voice-specific overlay from `prompts/voice_overlay.yaml` and appends it to the base prompt via `build_voice_prompt()` in `core/prompt_builder.py`. This overlay instructs the agent that it's a live call, doesn't know the borrower's name (must ask), and should never say `[borrower name]` literally. The base prompt stays intact for text simulation/evolution.
+
+### Call Termination
+
+The voice pipeline uses `[END_CALL:reason]` text markers for call termination — the same pattern as the simulation engine's `[END:reason]` signals. When the LLM includes `[END_CALL:goodbye]` (or `no_response`, `stop_calling`) in its output, `EndCallMarkerProcessor` strips the marker before TTS, disables idle timeout, and schedules an `EndFrame` after a 3-second grace period so the final audio plays through. This replaces the previous function-calling approach which was unreliable (LLM would narrate the tool call as speech).
+
+### Silence / Idle Detection
+
+The pipeline uses `LLMUserAggregatorParams(user_idle_timeout=7.0)` to detect when the borrower goes silent after the agent speaks. After 7 seconds of silence, a system message nudges the agent to check in. The idle counter resets to 0 whenever the user speaks (via `on_user_turn_started` handler), preventing premature escalation. After 3 consecutive idle events with no user speech, the agent wraps up with `[END_CALL:no_response]`.
+
+### Future: Tool Calling for Borrower Lookup
+
+Currently the agent has no access to borrower-specific data during live calls. A planned enhancement is to register OpenAI function-calling tools in the pipeline:
+
+- **`lookup_borrower(name: str)`** — After the borrower identifies themselves, the agent calls this tool to retrieve loan details (account number, outstanding amount, overdue EMIs, due dates) from MongoDB. This makes conversations data-driven rather than generic.
+- **`record_commitment(amount, date, mode)`** — Lets the agent log payment commitments in real-time during the call, rather than relying solely on post-call transcript analysis.
+
+This would use `OpenAILLMService`'s native function-calling support with pipecat's `FunctionCallResultFrame` flow. The tools would be registered on the `OpenAILLMContext` and backed by service functions that query MongoDB.
+
+### Subprocess Architecture
+
+The voice pipeline runs as a separate subprocess on port 8001 (own event loop, clean start/stop). The main API proxies WebRTC SDP offers to the subprocess via `POST /api/voice/offer`. Health polling ensures the subprocess is ready before accepting calls.
 
 ---
 
-## 13. Streamlit Dashboard
+## 14. FastAPI Backend
 
-`app.py` — 5 pages, reads from MongoDB, calls existing modules for actions.
+### App Factory Pattern
 
-| Page | What It Shows |
-|------|--------------|
-| **Personas** | 5 persona cards, "Run Simulation" button, live transcript, inline eval scores |
-| **Evolution** | Start/resume evolution, config inputs, progress display, score progression chart |
-| **Conversations** | Filter by version/persona/source/outcome, expandable transcripts with annotations |
-| **Archive** | Version lineage, prompt diffs from parent, per-persona score breakdowns |
-| **Voice Agent** | Launch Pipecat server, connection URL, voice conversation history |
+`api/main.py`: lifespan context manager initializes `BackgroundTaskManager` and seeds v0 on startup.
+
+### API Routes
+
+```
+GET    /api/versions                → list all (summary)
+GET    /api/versions/{id}           → full version detail
+GET    /api/versions/champion       → current champion
+
+GET    /api/conversations           → filtered (query: version_id, persona, source, outcome)
+GET    /api/conversations/{id}      → full transcript + eval
+
+GET    /api/evolution/runs          → list all runs
+GET    /api/evolution/runs/{id}     → run detail with generation log
+POST   /api/evolution/runs          → start new run (returns task_id)
+DELETE /api/evolution/runs/{id}     → cancel running evolution
+GET    /api/evolution/runs/{id}/stream → SSE: progress events
+
+POST   /api/simulation              → start simulation (returns task_id)
+GET    /api/simulation/{id}/stream  → SSE: live transcript turns
+
+POST   /api/evaluation              → evaluate a conversation (sync)
+
+GET    /api/voice/status            → is pipecat running?
+POST   /api/voice/start             → start pipecat subprocess (blocks until ready)
+POST   /api/voice/stop              → stop pipecat
+POST   /api/voice/offer             → proxy WebRTC SDP to pipecat subprocess
+
+GET    /api/playbook/tactics         → all tactics (newest first)
+GET    /api/playbook/tactics/{persona} → tactics for a persona type
+GET    /api/playbook/failures        → all failed approaches
+GET    /api/playbook/stats           → summary: totals by persona/section
+
+GET    /api/config                  → all non-secret settings
+```
+
+### Key Patterns
+
+- **Services are stateless functions**, not classes — take explicit dependencies, return domain models
+- **BackgroundTaskManager** holds per-task subscriber queues; `on_progress`/`on_turn` callbacks push into queues; SSE endpoints read from queues
+- **Guard**: max 1 concurrent evolution task
+- **Voice subprocess readiness**: `POST /start` polls `/health` on the subprocess until it responds (pipecat import takes ~15s)
 
 ---
 
-## 14. Configuration & Environment
+## 15. React Frontend
+
+### Stack
+
+Vite + React + TypeScript + Tailwind CSS + Recharts. Light professional theme (white bg, subtle borders).
+
+### 6 Pages
+
+| Page | What It Does |
+|------|-------------|
+| **Personas** | 5 persona cards, simulate → live SSE transcript → eval scores |
+| **Evolution** | Config form → start → SSE progress log → score chart (Recharts) |
+| **Conversations** | 4 filter dropdowns, expandable table with transcripts + eval |
+| **Archive** | Version list, prompt diffs from parent, per-persona score breakdowns |
+| **Voice Agent** | Version selector, start/stop server, native WebRTC call (no iframe), history |
+| **Playbook** | Accumulated tactics + failures across all runs, stats by persona/section |
+
+### Key Patterns
+
+- **State**: React hooks + fetch (no Redux)
+- **Real-time**: SSE via custom `useSSE` hook wrapping `EventSource`
+- **WebRTC**: Native in React — `getUserMedia`, `RTCPeerConnection`, SDP exchange via `/api/voice/offer`
+- **Dev proxy**: Vite proxies `/api` to localhost:8000
+
+---
+
+## 16. Configuration & Environment
 
 ### .env
 
@@ -675,15 +689,12 @@ MONGO_DB_NAME=darwin_godel
 ### config/settings.py
 
 ```python
-# Evolution
 MAX_GENERATIONS = 5
 SCORE_THRESHOLD = 4.0
-PLATEAU_WINDOW = 3
-PLATEAU_EPSILON = 0.1
 CONVERSATIONS_PER_PERSONA = 2
 MAX_TURNS_PER_CONVERSATION = 20
+MAX_PERSONA_REGRESSION = 0.5
 
-# Scoring weights (5 metrics)
 SCORING_WEIGHTS = {
     "goal_completion": 0.35,
     "conversational_quality": 0.15,
@@ -692,42 +703,45 @@ SCORING_WEIGHTS = {
     "sentiment_shift": 0.10,
 }
 
-# Regression guard
-MAX_PERSONA_REGRESSION = 0.5
-
-# Models — switched by LLM_PROVIDER env var
-# openai → gpt-5.2, anthropic → claude-sonnet-4-6, google → gemini-3-flash-preview
-# Voice always uses gpt-4.1-mini (lowest latency)
+# Playbook
+TACTIC_SCORE_THRESHOLD = 3.5       # Min score to extract tactics from a conversation
+MAX_TACTICS_PER_PROMPT = 5         # Max tactics injected into a single prompt
 ```
 
 ### MongoDB Collections
 
 ```
 Database: darwin_godel
-
-1. agent_versions — one doc per version, indexed by id, generation, status
-2. conversations  — one doc per conversation, indexed by agent_version_id, persona_type, source
-3. evolution_runs — one doc per evolution loop execution
+1. agent_versions     — one doc per version, indexed by id
+2. conversations      — one doc per conversation, indexed by agent_version_id
+3. evolution_runs     — one doc per evolution loop execution
+4. strategy_tactics   — append-only, accumulates winning tactics across runs
+5. failed_approaches  — append-only, accumulates failed mutation attempts across runs
 ```
 
 ---
 
-## 15. Key Design Decisions
+## 17. Key Design Decisions
 
 | # | Decision | Rationale |
 |---|----------|-----------|
-| 1 | Sectioned prompts over monolithic | Targeted mutation, controlled experiments, readable diffs. Monolithic is a shotgun; sectioned is a scalpel. |
-| 2 | Hill-climbing with 2 candidates | Basic exploration at ~2× cost, not N× for population-based. Sufficient for this scale. |
-| 3 | Regression detection per persona | Prevents oscillation — fixing one persona while breaking another. Ensures monotonic improvement. |
-| 4 | Separate failure analysis from mutation | Diagnosis and prescription are different skills. Better explainability artifacts. |
-| 5 | Multiple conversations per persona (median) | LLM conversations are stochastic. Median of N reduces outlier impact. |
-| 6 | Immutable compliance section | Safety rail. Prevents optimizer from discovering "threatening works." |
-| 7 | Per-turn annotations | Gives failure analyzer surgical targets, not just holistic scores. |
-| 8 | LLM-as-judge with structured rubrics | "Rate 1-5" is noisy. Concrete anchors reduce inter-call variance. |
-| 9 | Text simulation first, voice last | Evolution loop is 95% of the intellectual content. Voice is a presentation layer. |
-| 10 | MongoDB over JSON files | Better querying for the Streamlit dashboard — filter by version, persona, score. |
-| 11 | Multi-provider LLM support | Switch between OpenAI, Anthropic, Google via env var. No code changes. |
-| 12 | 5 metrics over 3 | Assignment says "at least 3." Hallucination detection, consistency, and sentiment shift show depth. |
+| 1 | Sectioned prompts over monolithic | Targeted mutation, controlled experiments, readable diffs |
+| 2 | Hill-climbing with 2 candidates | Basic exploration at ~2× cost, not N× for population-based |
+| 3 | Regression detection per persona | Prevents oscillation — improving one persona while breaking another |
+| 4 | Separate failure analysis from mutation | Diagnosis and prescription are different skills |
+| 5 | Multiple conversations per persona (median) | LLM conversations are stochastic. Median reduces outlier impact |
+| 6 | Immutable compliance section | Safety rail. Prevents optimizer from discovering "threatening works" |
+| 7 | Per-turn annotations | Surgical targets for failure analyzer, not just holistic scores |
+| 8 | Persistent playbook over stateless mutation | Prompt rewriting alone has no memory — the mutator repeats mistakes and loses winning tactics across runs. The playbook adds declarative + procedural memory |
+| 9 | Tactic extraction from high-scoring convos | Knowledge should be extracted from success, not just inferred from failure. A conversation that scored 4.5 contains reusable tactics that should persist |
+| 10 | Failed approach recording | Negative knowledge is as valuable as positive — prevents the mutator from trying the same thing twice |
+| 11 | Per-persona tactic injection | Different personas need different tactics. A de-escalation tactic for angry borrowers would be counterproductive with cooperative ones |
+| 12 | Text simulation first, voice last | Evolution loop is 95% of the work; voice is presentation layer |
+| 13 | React + FastAPI over Streamlit | Proper API layer, SSE streaming, embeddable WebRTC, production-ready |
+| 14 | Voice as subprocess | Own event loop, clean start/stop, no conflict with API server's asyncio |
+| 15 | SSE over WebSocket | Unidirectional streaming is all we need; simpler than WebSocket |
+| 16 | MongoDB over JSON files | Better querying + append-only playbook collections that accumulate across runs |
+| 17 | Multi-provider LLM support | Switch between OpenAI, Anthropic, Google via env var |
 
 ---
 

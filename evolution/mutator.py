@@ -27,7 +27,7 @@ SPECIFIC EXAMPLES OF THE FAILURE:
 
 DIRECTION FOR IMPROVEMENT:
 {direction}
-
+{playbook_context}
 CONSTRAINTS:
 - Keep the same overall structure and approximate length (±20%)
 - Do not contradict anything in the COMPLIANCE section
@@ -40,6 +40,30 @@ RATIONALE: [One paragraph explaining what you changed and why]
 ---
 NEW_SECTION:
 [The complete rewritten section text]"""
+
+
+def _build_playbook_context(section_name: str) -> str:
+    """Build playbook context string for the mutation prompt."""
+    from core.playbook import get_failures_for_section, get_tactics_for_section
+
+    tactics = get_tactics_for_section(section_name, limit=5)
+    failures = get_failures_for_section(section_name, limit=5)
+
+    if not tactics and not failures:
+        return ""
+
+    parts = []
+    if tactics:
+        tactic_lines = "\n".join(f"  - {t.tactic}" for t in tactics)
+        parts.append(f"PROVEN TACTICS for {section_name.upper()} (incorporate these):\n{tactic_lines}")
+    if failures:
+        failure_lines = "\n".join(
+            f"  - {f.description} (result: {f.failure_reason}, score {f.score_before:.2f} → {f.score_after:.2f})"
+            for f in failures
+        )
+        parts.append(f"FAILED APPROACHES for {section_name.upper()} (avoid these):\n{failure_lines}")
+
+    return "\n\n" + "\n\n".join(parts) + "\n"
 
 
 def _format_examples(pattern: FailurePattern) -> str:
@@ -83,6 +107,8 @@ async def generate_candidates(
     current_text = parent.prompt_sections[section_name]
     examples = _format_examples(pattern)
 
+    playbook_context = _build_playbook_context(section_name)
+
     prompt = MUTATION_PROMPT.format(
         full_prompt=full_prompt,
         section_name=section_name.upper(),
@@ -90,6 +116,7 @@ async def generate_candidates(
         failure_description=pattern.description,
         examples=examples,
         direction=pattern.suggested_direction,
+        playbook_context=playbook_context,
     )
 
     candidates = []

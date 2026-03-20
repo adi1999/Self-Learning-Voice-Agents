@@ -14,6 +14,9 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "")
 
+# --- TTS Provider ---
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram")  # "deepgram" | "cartesia"
+
 # --- MongoDB ---
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://admin:secret@localhost:27018/?authSource=admin")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "darwin_godel")
@@ -68,6 +71,10 @@ BASE_PROMPT_PATH = PROJECT_ROOT / "prompts" / "base_v0.yaml"
 
 # --- Persona Archetypes ---
 PERSONA_ARCHETYPES = ["angry", "evasive", "hardship", "informed", "cooperative"]
+
+# --- Playbook ---
+TACTIC_SCORE_THRESHOLD = 3.5
+MAX_TACTICS_PER_PROMPT = 5
 
 # --- Immutable Section ---
 IMMUTABLE_SECTIONS = {"compliance"}

@@ -1,8 +1,8 @@
 # Self-Evolving Voice Agent
 
-A platform that **automatically evolves** a debt collection voice agent's prompts through simulated conversations, automated evaluation, failure analysis, and targeted prompt mutation — without human intervention.
+A platform that **automatically evolves** a debt collection voice agent through simulated conversations, automated evaluation, failure analysis, targeted prompt mutation, and persistent knowledge accumulation — without human intervention.
 
-The system simulates conversations against 5 borrower personas, scores them across 5 metrics using LLM judges, identifies failure patterns, rewrites the weakest prompt section, and promotes improvements — all in a closed loop. The final evolved prompt powers a real-time voice agent via Pipecat.
+The system simulates conversations against 5 borrower personas, scores them across 5 metrics using LLM judges, identifies failure patterns, rewrites the weakest prompt section, and promotes improvements — all in a closed loop. Beyond prompt rewriting, it extracts winning tactics from high-scoring conversations and records failed mutation approaches into a **strategy playbook** that persists across runs, so the system genuinely learns from experience rather than just rewords instructions. The final evolved prompt — enriched with accumulated knowledge — powers a real-time voice agent via Pipecat.
 
 ---
 
@@ -12,6 +12,8 @@ The system simulates conversations against 5 borrower personas, scores them acro
                     ┌──────────────────────────────┐
                     │     1. SIMULATE (LLM ↔ LLM)  │
                     │  Agent vs 5 borrower personas │
+                    │  (with learned tactics injected│
+                    │   per persona from playbook)   │
                     └──────────────┬───────────────┘
                                    ▼
                     ┌──────────────────────────────┐
@@ -21,41 +23,92 @@ The system simulates conversations against 5 borrower personas, scores them acro
                     └──────────────┬───────────────┘
                                    ▼
                     ┌──────────────────────────────┐
-                    │     3. ANALYZE FAILURES       │
+                    │  3. EXTRACT TACTICS (playbook) │
+                    │  High-scoring convos → reusable│
+                    │  tactics saved to MongoDB      │
+                    └──────────────┬───────────────┘
+                                   ▼
+                    ┌──────────────────────────────┐
+                    │     4. ANALYZE FAILURES       │
                     │  Top 3 patterns → which       │
                     │  prompt section to fix         │
+                    │  (informed by cross-run tactics)│
                     └──────────────┬───────────────┘
                                    ▼
                     ┌──────────────────────────────┐
-                    │     4. MUTATE (2 candidates)  │
-                    │  Rewrite target section only   │
+                    │     5. MUTATE (2 candidates)  │
+                    │  Rewrite target section, with  │
+                    │  proven tactics + failed        │
+                    │  approaches from playbook       │
                     └──────────────┬───────────────┘
                                    ▼
                     ┌──────────────────────────────┐
-                    │     5. SELECT (hill-climbing)  │
+                    │     6. SELECT (hill-climbing)  │
                     │  Promote if better + no        │
                     │  per-persona regression         │
+                    │  Record failures to playbook   │
                     └──────────────┬───────────────┘
                                    │
                          Loop until threshold
                          reached or plateau
 ```
 
-### Evolution in Action
+### How We Built This — Two Phases
 
-Starting from a handcrafted base prompt (v0), the system ran 5 generations and improved the aggregate score from **3.45 → 4.06**, hitting the success threshold. Key mutation: rewriting the `objective` section at Generation 3 produced a breakthrough after `strategy` mutations had plateaued.
+We started with the simplest thing that could work: **prompt-level string rewriting**.
+
+**Phase 1 — Prompt Evolution (hill-climbing):** The system simulates conversations, evaluates with 5 judges, analyzes failures, rewrites one prompt section at a time, and selects non-regressing candidates. This is a closed loop that optimizes *what the agent says* — the literal text of its system prompt. Starting from a handcrafted base prompt (v0), this loop ran 5 generations and improved the aggregate score from **3.45 → 4.06**, hitting the success threshold.
+
+But prompt rewriting has a fundamental limitation: **it has no memory**. Each mutation starts from scratch. If the mutator tried something in generation 2 that failed, it might try the exact same thing in generation 4. If a conversation with an angry borrower scored 4.5 because the agent used a specific de-escalation tactic, that insight dies with the conversation — it never gets extracted or reused.
+
+This is the shallowest form of self-modification. The system rewrites *instructions* but never accumulates *knowledge*.
+
+**Phase 2 — Persistent Knowledge (playbook):** Inspired by how Hermes Agent (Nous Research) achieves genuine self-improvement through procedural memory (skills), declarative memory, and episodic recall, we added a **strategy playbook** — a persistent knowledge layer that accumulates across generations and across runs.
+
+After each evaluation, the system now:
+- **Extracts winning tactics** from high-scoring conversations (score >= 3.5) — concrete, reusable strategies tied to specific persona types and prompt sections
+- **Records failed approaches** when candidates aren't promoted — what was tried, why it failed, score deltas
+
+This accumulated knowledge feeds back into the loop at every stage:
+- **Simulation**: Persona-specific tactics are injected into the live prompt, so the agent's behavior reflects everything it has ever learned, not just the latest prompt rewrite
+- **Failure analysis**: Cross-run tactics inform pattern detection — the analyzer knows what has worked before
+- **Mutation**: The mutator sees both proven tactics to incorporate and failed approaches to avoid, so it never repeats the same mistake twice
+
+The key insight: Phase 1 optimizes *what the agent says*. Phase 2 optimizes *what the agent knows*. Together, they create a system that genuinely learns from experience rather than just rewords instructions.
 
 ---
 
 ## Architecture
 
-Three independent subsystems communicating through MongoDB:
+```
+React (Vite SPA, port 3000)        ← dev proxy /api → localhost:8000
+    ↓ REST + SSE
+FastAPI (port 8000)
+    ├── /api/versions/*            ← agent version CRUD
+    ├── /api/conversations/*       ← conversation queries
+    ├── /api/evolution/runs/*      ← start/stop/stream evolution
+    ├── /api/simulation/*          ← trigger + stream transcripts
+    ├── /api/evaluation/*          ← trigger evaluation
+    ├── /api/voice/*               ← start/stop pipecat + WebRTC offer proxy
+    ├── /api/playbook/*            ← accumulated tactics + failures
+    └── /api/config                ← read-only settings
+    ↓
+core/ simulation/ evaluation/ evolution/  (domain logic)
+    ↓
+MongoDB (agent_versions, conversations, evolution_runs,
+         strategy_tactics, failed_approaches)
+    ↓
+Pipecat Voice Pipeline (subprocess, port 8001)
+    STT (Deepgram) → LLM (OpenAI) → TTS (Cartesia) → WebRTC
+```
+
+Three independent subsystems:
 
 | Subsystem | What It Does | Runs Without |
 |-----------|-------------|-------------|
-| **Evolution Engine** | Simulate → Evaluate → Analyze → Mutate → Select | Voice, Dashboard |
-| **Voice Frontend** | Pipecat pipeline: STT → LLM → TTS over WebRTC | Evolution |
-| **Streamlit Dashboard** | Live UI for personas, evolution runs, conversations, archive | Everything (reads DB) |
+| **Evolution Engine** | Simulate → Evaluate → Extract tactics → Analyze → Mutate → Select → Record failures | Voice, Dashboard |
+| **Voice Pipeline** | Pipecat: STT → LLM → TTS over WebRTC | Evolution |
+| **React + FastAPI Dashboard** | Full UI for all operations + Playbook viewer | Evolution, Voice (reads DB) |
 
 ```
 config/          ← depends on nothing
@@ -64,7 +117,8 @@ simulation/      ← depends on core
 evaluation/      ← depends on core
 evolution/       ← depends on simulation, evaluation, core
 voice/           ← depends on core (+ Pipecat)
-dashboard/       ← depends on core
+api/             ← depends on everything (HTTP layer)
+frontend/        ← depends on api (HTTP only)
 scripts/         ← thin CLI wrappers
 ```
 
@@ -117,8 +171,6 @@ Each conversation is scored by 5 independent LLM judges:
 | Response Consistency | 0 or 1 | 10% | Does the agent contradict itself? |
 | Sentiment Shift | -1 to +1 | 10% | Did the borrower's sentiment improve? |
 
-**Why compliance weight is 30%**: A compliant conversation that fails to close is better than an illegal conversation that succeeds.
-
 **Per-persona scores** use the median of N conversations (not mean) to reduce outlier impact from LLM stochasticity.
 
 ---
@@ -140,6 +192,7 @@ This ensures **monotonic improvement across all personas**, not just the aggrega
 ### Prerequisites
 
 - Python 3.11+
+- Node.js 18+ (for React frontend)
 - MongoDB (local instance)
 - API keys: OpenAI or Anthropic or Google, plus Deepgram and Cartesia for voice
 
@@ -149,12 +202,15 @@ This ensures **monotonic improvement across all personas**, not just the aggrega
 git clone https://github.com/<your-username>/Self-Learning-Voice-Agents.git
 cd Self-Learning-Voice-Agents
 
-# Create a virtual environment
+# Python backend
 python -m venv .venv
 source .venv/bin/activate
+pip install -r requirements.txt
 
-# Install dependencies
-pip install -e .
+# React frontend
+cd frontend
+npm install
+cd ..
 
 # Copy and fill in API keys
 cp .env.example .env
@@ -172,7 +228,7 @@ OPENAI_API_KEY=sk-...
 # ANTHROPIC_API_KEY=sk-ant-...
 # GOOGLE_API_KEY=...
 
-# Voice Services
+# Voice Services (only needed for voice agent)
 DEEPGRAM_API_KEY=...          # STT
 CARTESIA_API_KEY=...          # TTS
 
@@ -185,19 +241,38 @@ MONGO_DB_NAME=darwin_godel
 
 ## Usage
 
-### Streamlit Dashboard (recommended)
+### Development (two terminals)
 
 ```bash
-streamlit run app.py
+# Terminal 1: FastAPI backend
+source .venv/bin/activate
+python scripts/run_api.py
+
+# Terminal 2: React frontend
+cd frontend
+npm run dev
 ```
 
-The dashboard provides 5 pages:
+Open http://localhost:3000
 
-1. **Personas** — View persona cards, run individual simulations with live transcript updates
-2. **Evolution** — Start/resume evolution runs, view score progression charts
+### Production (single port)
+
+```bash
+cd frontend && npm run build && cd ..
+source .venv/bin/activate
+python scripts/run_api.py
+```
+
+Open http://localhost:8000
+
+### Dashboard Pages
+
+1. **Personas** — 5 persona cards, run individual simulations with live SSE transcript updates, inline eval scores
+2. **Evolution** — Configure and start evolution runs, real-time progress streaming, score progression charts
 3. **Conversations** — Filter and browse all conversation transcripts with evaluation breakdowns
-4. **Archive** — View agent version lineage, prompt diffs, per-persona scores
-5. **Voice Agent** — Launch the Pipecat voice agent, browse voice conversation history
+4. **Archive** — Agent version lineage, prompt diffs from parent, per-persona score tables
+5. **Voice Agent** — Start/stop Pipecat voice server, native WebRTC call directly in browser, voice conversation history
+6. **Playbook** — Accumulated strategy tactics and failed approaches across all evolution runs
 
 ### CLI Scripts
 
@@ -211,13 +286,13 @@ python scripts/run_simulation.py --version v0
 # Re-evaluate existing conversation logs
 python scripts/run_eval.py --version v0
 
-# Start the voice agent with a specific prompt version
+# Start the voice agent standalone (without React)
 python scripts/run_voice.py --version <champion-id>
 
 # Generate static HTML report
 python scripts/generate_report.py
 
-# Export MongoDB data to JSON (for GitHub submission)
+# Export MongoDB data to JSON
 python scripts/export_json.py
 ```
 
@@ -226,53 +301,26 @@ python scripts/export_json.py
 ## Project Structure
 
 ```
-├── app.py                          # Streamlit UI (5 pages)
-├── config/
-│   ├── settings.py                 # All config: API keys, thresholds, weights, model choices
-│   └── personas.py                 # 5 persona archetypes + randomization (Indian context)
-├── core/
-│   ├── models.py                   # Pydantic models: AgentVersion, Conversation, EvalResult, etc.
-│   ├── db.py                       # MongoDB connection + collection references
-│   ├── archive.py                  # Archive CRUD (agent versions, conversations, evolution runs)
-│   ├── prompt_builder.py           # Assembles 6 sections → full system prompt
-│   └── llm_client.py              # LLM wrapper: OpenAI / Anthropic / Google, retries, cost tracking
-├── simulation/
-│   ├── conversation.py             # Turn-by-turn ping-pong engine (agent LLM ↔ persona LLM)
-│   ├── persona_runner.py           # Batch orchestrator: all personas in parallel
-│   └── termination.py             # End-of-conversation detection ([END:reason] signals)
-├── evaluation/
-│   ├── judges.py                   # 5 judges: goal, quality, compliance, consistency, sentiment
-│   ├── scorer.py                   # Score aggregation: per-conversation → per-persona → aggregate
-│   └── annotator.py               # Per-turn annotation extraction
-├── evolution/
-│   ├── failure_analyzer.py         # Top 3 failure patterns → target prompt section
-│   ├── mutator.py                  # Targeted single-section rewrite (2 candidates)
-│   ├── selector.py                 # Regression-aware hill climbing
-│   └── loop.py                     # Full evolution loop orchestrator
-├── voice/
-│   ├── pipeline.py                 # Pipecat: SmallWebRTCTransport + OpenAILLMService + ConversationLogger
-│   └── run_voice.py               # FastAPI server with WebRTC signaling
-├── dashboard/
-│   ├── streamlit_helpers.py        # Shared UI components (transcripts, scores, badges)
-│   ├── tree_visualizer.py          # Agent lineage DAG (Mermaid)
-│   ├── score_charts.py            # Score progression charts (Plotly)
-│   ├── diff_viewer.py             # Prompt section diffs between generations
-│   └── report_generator.py        # Static HTML report generation
-├── prompts/
-│   └── base_v0.yaml               # Handcrafted seed prompt (6 sections, Indian NBFC context)
-├── static/
-│   └── index.html                  # WebRTC browser client for voice agent
-├── scripts/
-│   ├── run_evolution.py            # CLI: full evolution loop
-│   ├── run_simulation.py           # CLI: simulate one version
-│   ├── run_eval.py                 # CLI: evaluate conversations
-│   ├── run_voice.py               # CLI: start voice agent
-│   ├── generate_report.py         # CLI: generate HTML report
-│   └── export_json.py             # CLI: dump MongoDB → JSON
-└── data/                           # Exported JSON data (from export_json.py)
-    ├── archive/
-    ├── conversations/
-    └── reports/
+├── config/                         # Configuration (API keys, thresholds, personas)
+├── core/                           # Shared domain: models, archive, prompt builder, LLM client
+├── simulation/                     # Turn-by-turn conversation engine
+├── evaluation/                     # 5 LLM judges + score aggregation
+├── evolution/                      # Failure analysis, mutation, selection, loop orchestrator
+├── voice/                          # Pipecat pipeline + WebRTC server
+├── api/                            # FastAPI: routers, services, schemas, task manager
+│   ├── routers/                    # REST endpoints (versions, conversations, evolution, etc.)
+│   ├── services/                   # Stateless service functions bridging routers → core
+│   └── schemas/                    # Pydantic request/response models
+├── frontend/                       # React + Vite + TypeScript + Tailwind
+│   └── src/
+│       ├── pages/                  # 6 pages: Personas, Evolution, Conversations, Archive, Voice, Playbook
+│       ├── components/             # Reusable UI components
+│       ├── hooks/                  # useSSE hook
+│       └── api/                    # Typed fetch client
+├── dashboard/                      # HTML report generation (Jinja2 templates)
+├── prompts/                        # Base prompt YAML
+├── scripts/                        # CLI entry points
+└── data/                           # Exported JSON data
 ```
 
 ---
@@ -285,11 +333,17 @@ python scripts/export_json.py
 | Hill-climbing with 2 candidates | Basic exploration at ~2× cost, not N× for population-based |
 | Regression detection per persona | Prevents oscillation — improving one persona while regressing another |
 | Separate failure analysis from mutation | Diagnosis and prescription are different skills; better explainability |
-| 3 conversations per persona (median) | Reduces noise from LLM stochasticity |
+| Multiple conversations per persona (median) | Reduces noise from LLM stochasticity |
 | Immutable compliance section | Safety rail against the optimizer gaming the metric |
 | Per-turn annotations | Surgical targets for the failure analyzer, not just holistic scores |
+| Persistent playbook over stateless mutation | Prompt rewriting alone has no memory — the mutator repeats mistakes and loses winning tactics across runs |
+| Tactic extraction from high-scoring convos | Knowledge should be extracted from success, not just inferred from failure patterns |
+| Failed approach recording | Prevents the mutator from trying the same thing twice — negative knowledge is as valuable as positive |
+| Per-persona tactic injection | Different personas need different tactics; a de-escalation tactic for angry borrowers hurts with cooperative ones |
 | Text simulation first, voice last | Evolution loop is 95% of the work; voice is a presentation layer |
-| MongoDB over JSON files | Better querying for the Streamlit dashboard (filter by version, persona, score) |
+| React + FastAPI over Streamlit | Proper API layer, SSE streaming, native WebRTC, production-ready |
+| Voice as subprocess | Own event loop, clean start/stop, no asyncio conflicts |
+| MongoDB over JSON files | Better querying — filter by version, persona, score; append-only playbook collections accumulate across runs |
 | Multi-provider LLM support | Switch between OpenAI, Anthropic, Google via env var — no code changes |
 
 ---
@@ -299,9 +353,9 @@ python scripts/export_json.py
 The current implementation uses English in an Indian financial context (NBFC terminology, RBI compliance, EMI/UPI/NEFT references). The architecture is language-agnostic — adding Hindi/Hinglish support requires only:
 
 1. Translating persona prompts in `config/personas.py`
-2. Selecting appropriate TTS voices (e.g., ElevenLabs Multilingual V2)
-3. Ensuring STT model supports the target language (Deepgram supports Hindi)
-4. Updating evaluation judge prompts to evaluate in the target language
+2. Selecting appropriate TTS voices
+3. Ensuring STT model supports the target language
+4. Updating evaluation judge prompts
 
 No architectural changes needed.
 
@@ -316,6 +370,37 @@ No architectural changes needed.
 | Deep run | 10 | ~7,000 | $5–15 |
 
 Actual cost depends on conversation length and model choice.
+
+### Token Usage Note
+
+Both the agent-to-agent simulation and the live voice pipeline use **stateless LLM APIs** (OpenAI, Anthropic, Google). This means the **full conversation history is resent with every turn** — there is no server-side session. In a 20-turn conversation, turn 20's API call includes turns 1–19 plus the system prompt as input tokens. This is the standard approach for all Chat Completions-style APIs and is how context is maintained. The tradeoff is higher input token cost in exchange for simplicity and reliability (no session state to manage or lose). Possible optimizations include sliding-window context (only send last N turns), periodic summarization of older turns, or leveraging provider-side prompt caching (OpenAI and Anthropic automatically cache repeated prefixes, reducing cost on the system prompt + early turns).
+
+---
+
+## Limitations & Roadmap
+
+### Known Limitations
+
+**LLM-as-judge circularity.** The system is LLMs all the way down — LLM personas, LLM agent, LLM judges, LLM failure analyzer, LLM mutator. There is no ground truth anchor. The optimizer might learn to satisfy judge preferences rather than actual collection effectiveness. A persona LLM saying "I'll pay" is not a real borrower paying.
+
+**Sim-to-real gap.** Simulated personas follow their archetype instructions faithfully. Real humans interrupt, ramble, switch languages mid-sentence, go silent, lie inconsistently, or pick up the phone thinking it's someone else. The 5 archetypes also miss real-world types: confused elderly callers, non-native speakers, someone who already paid and is angry, or a family member who answered.
+
+**No structured data capture.** The agent talks but captures nothing verifiable. There's no tool call to look up borrower details, no structured commitment record (amount + date + mode), no post-call extraction. Evaluation is purely holistic transcript reading — "vibes-based" rather than fact-based.
+
+**No multi-call memory.** Real debt collection is multi-touch. "Mr. Sharma, when we spoke Tuesday you mentioned your salary comes on the 25th." The system treats every call as a cold start.
+
+**No conversation efficiency signal.** A 20-turn conversation scoring 3.5 and a 6-turn conversation scoring 3.5 are treated identically. In production, shorter successful calls = more calls per hour = more revenue.
+
+### Roadmap (by impact)
+
+1. **Human-labeled calibration set** — 20 conversations scored by humans. Compare to LLM judges. If correlation is low, the judges are measuring the wrong thing. Everything else is pointless without this.
+2. **Tool calls (lookup + record_commitment)** — Structured, verifiable output. Transforms "did the persona say yes" into "did the agent correctly capture commitment details." Objective ground truth within simulation.
+3. **Rule-based compliance hard gate** — Regex/pattern matching for banned phrases and threats, running before the LLM compliance judge. Non-negotiable for financial services.
+4. **Structured extraction → deterministic scoring** — Parse transcripts into structured records (identity verified, commitment amount/date, reason for default). Replace subjective LLM judges with deterministic scoring wherever possible. Reserve LLM judges only for genuinely subjective dimensions (tone, quality).
+5. **More persona types** — Confused, already-paid-and-angry, family-member-answered. Cheap to add, catches real failure modes.
+6. **Conversation efficiency metric** — Turns-to-resolution as a scoring factor.
+7. **A/B testing framework** — Route calls between prompt versions, compare real outcomes.
+8. **Multi-call memory** — Cross-session context for repeat borrowers.
 
 ---
 

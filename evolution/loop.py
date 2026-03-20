@@ -28,6 +28,7 @@ from evaluation.scorer import evaluate_all
 from evolution.failure_analyzer import analyze_failures
 from evolution.mutator import generate_candidates
 from evolution.selector import select_champion
+from evolution.tactic_extractor import extract_tactics_from_conversations, record_failed_candidates
 from simulation.persona_runner import run_full_evaluation_suite
 
 logger = logging.getLogger(__name__)
@@ -210,8 +211,12 @@ async def run_evolution(
             "mutation_target": None,
         })
 
+        # Extract tactics from v0 conversations
+        v0_tactics = await extract_tactics_from_conversations(conversations, v0_id, run_id)
+        logger.info(f"v0: extracted {len(v0_tactics)} tactics")
+
         logger.info(f"v0 baseline score: {scores.aggregate:.2f}")
-        _progress({"generation": 0, "phase": "done", "score": scores.aggregate})
+        _progress({"generation": 0, "phase": "done", "score": scores.aggregate, "tactics_extracted": len(v0_tactics)})
 
         # Save run immediately so it can be resumed
         _save_run(run_id, datetime.now(timezone.utc), champion, generation_log, all_version_ids, "in_progress")
@@ -320,9 +325,19 @@ async def run_evolution(
 
             logger.info(f"  {vid}: aggregate={candidate_scores.aggregate:.2f}")
 
+        # 5b. EXTRACT TACTICS from all candidate conversations
+        gen_tactics_count = 0
+        for cv in candidate_versions:
+            cv_convos = load_conversations(cv.id)
+            cv_tactics = await extract_tactics_from_conversations(cv_convos, cv.id, run_id)
+            gen_tactics_count += len(cv_tactics)
+
         # 6. SELECT
         _progress({"generation": gen, "phase": "selecting", "message": "Selecting champion"})
         winner = select_champion(champion, candidate_versions)
+
+        # 6b. RECORD FAILURES for non-promoted candidates
+        gen_failures = record_failed_candidates(champion, candidate_versions, winner, run_id)
 
         if winner:
             winner.status = "promoted"
@@ -334,6 +349,8 @@ async def run_evolution(
         else:
             logger.info(f"No improvement — champion stays at {champion.id}")
 
+        logger.info(f"Gen {gen}: {gen_tactics_count} tactics extracted, {len(gen_failures)} failures recorded")
+
         generation_log.append({
             "generation": gen,
             "champion_id": champion.id,
@@ -341,9 +358,14 @@ async def run_evolution(
             "versions_tested": gen_version_ids,
             "mutation_target": target_section,
             "promoted": winner.id if winner else None,
+            "tactics_extracted": gen_tactics_count,
+            "failures_recorded": len(gen_failures),
         })
 
-        _progress({"generation": gen, "phase": "done", "score": champion.scores.aggregate})
+        _progress({
+            "generation": gen, "phase": "done", "score": champion.scores.aggregate,
+            "tactics_extracted": gen_tactics_count, "failures_recorded": len(gen_failures),
+        })
 
         # Save progress after each generation so we can resume
         _save_run(run_id, run_start, champion, generation_log, all_version_ids, "in_progress")

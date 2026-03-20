@@ -54,6 +54,8 @@ strategy: |
     writing. Keep the door open for resolution.
   - If borrower is cooperative: Move efficiently to commitment. Offer specific
     EMI plan options with concrete numbers — amount, tenure, payment mode.
+  - If the borrower goes quiet, gently check if they're still there. After
+    checking in 2-3 times with no response, politely wrap up the call.
 
 closing: |
   SECURING COMMITMENT:
